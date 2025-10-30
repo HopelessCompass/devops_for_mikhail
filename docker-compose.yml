@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  mariadb:
+    image: mariadb:10.6
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - backend
+
+  redis_legacy:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis_legacy_data:/data
+    networks:
+      - backend
+
+  redis_new:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis_new_data:/data
+    networks:
+      - backend
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:21.1.1
+    command: ["start-dev"]
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    ports:
+      - "8080:8080"
+    networks:
+      - backend
+
+  legacy-api:
+    build:
+      context: .
+      dockerfile: legacy/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mariadb:3306/${MYSQL_DATABASE}"
+      REDIS_HOST: redis_legacy
+      KEYCLOAK_URL: "http://keycloak:8080"
+    depends_on:
+      - mariadb
+      - redis_legacy
+      - keycloak
+    networks:
+      - backend
+
+  new-api:
+    build:
+      context: .
+      dockerfile: newapi/Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mariadb:3306/${MYSQL_DATABASE}"
+      REDIS_HOST: redis_new
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672"
+      KEYCLOAK_URL: "http://keycloak:8080"
+    depends_on:
+      - mariadb
+      - redis_new
+      - rabbitmq
+      - keycloak
+    networks:
+      - backend
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - new-api
+    networks:
+      - frontend_net
+      - backend
+
+  nginx:
+    image: nginx:stable-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - frontend
+      - legacy-api
+      - new-api
+    networks:
+      - frontend_net
+      - backend
+
+volumes:
+  db_data:
+  redis_legacy_data:
+  redis_new_data:
+  rabbitmq_data:
+
+networks:
+  backend:
+  frontend_net:
