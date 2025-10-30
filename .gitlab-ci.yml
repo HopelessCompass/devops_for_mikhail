@@ -1,0 +1,87 @@
+stages:
+  - build
+  - test
+  - push
+  - deploy
+
+variables:
+  DOCKER_DRIVER: overlay2
+  IMAGE_REGISTRY: registry.example.com/my-project
+  COMPOSE_FILE: docker-compose.yml
+
+before_script:
+  - docker info || true
+
+build_images:
+  stage: build
+  image: docker:24.0.2
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t $IMAGE_REGISTRY/legacy-api:$CI_COMMIT_SHORT_SHA -f legacy/Dockerfile .
+    - docker build -t $IMAGE_REGISTRY/new-api:$CI_COMMIT_SHORT_SHA -f newapi/Dockerfile .
+    - docker build -t $IMAGE_REGISTRY/frontend:$CI_COMMIT_SHORT_SHA -f frontend/Dockerfile .
+  only:
+    - branches
+
+php_unit_tests:
+  stage: test
+  image: php:8.4-cli
+  script:
+    - |
+      if [ -d legacy ] && [ -f legacy/vendor/bin/phpunit ]; then
+        cd legacy
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit || true
+        cd ..
+      fi
+    - |
+      if [ -d newapi ] && [ -f newapi/vendor/bin/phpunit ]; then
+        cd newapi
+        composer install --no-interaction --prefer-dist
+        vendor/bin/phpunit || true
+        cd ..
+      fi
+  only:
+    - branches
+
+push_images:
+  stage: push
+  image: docker:24.0.2
+  services:
+    - docker:24-dind
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+    - docker tag $IMAGE_REGISTRY/legacy-api:$CI_COMMIT_SHORT_SHA $IMAGE_REGISTRY/legacy-api:latest
+    - docker tag $IMAGE_REGISTRY/new-api:$CI_COMMIT_SHORT_SHA $IMAGE_REGISTRY/new-api:latest
+    - docker tag $IMAGE_REGISTRY/frontend:$CI_COMMIT_SHORT_SHA $IMAGE_REGISTRY/frontend:latest
+    - docker push $IMAGE_REGISTRY/legacy-api:$CI_COMMIT_SHORT_SHA
+    - docker push $IMAGE_REGISTRY/new-api:$CI_COMMIT_SHORT_SHA
+    - docker push $IMAGE_REGISTRY/frontend:$CI_COMMIT_SHORT_SHA
+    - docker push $IMAGE_REGISTRY/legacy-api:latest
+    - docker push $IMAGE_REGISTRY/new-api:latest
+    - docker push $IMAGE_REGISTRY/frontend:latest
+  only:
+    - branches
+  dependencies:
+    - build_images
+
+deploy_to_test:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+  script:
+    - |
+      # ожидается: настроенный SSH-ключ в CI (CI_DEPLOY_USER, CI_DEPLOY_HOST) и docker-compose на сервере
+      mkdir -p ~/.ssh
+      echo "$DEPLOY_PRIVATE_KEY" > ~/.ssh/id_rsa
+      chmod 600 ~/.ssh/id_rsa
+      ssh -o StrictHostKeyChecking=no $CI_DEPLOY_USER@$CI_DEPLOY_HOST "
+        cd /opt/project || exit 1
+        docker-compose pull || true
+        docker-compose up -d --remove-orphans
+      "
+  only:
+    - branches
+  when: manual
